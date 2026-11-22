@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Old Phone CCTV</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0b0d10;color:#e8eaed;font-family:system-ui,-apple-system,Roboto,sans-serif}
+body{display:flex;flex-direction:column;overflow:hidden}
+#top{display:flex;gap:8px;align-items:center;padding:8px 12px;background:#14181d;font-size:13px}
+#dot{width:10px;height:10px;border-radius:50%;background:#888;flex:none}
+#dot.on{background:#3ddc84}
+#dot.off{background:#ff5252}
+#info{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#box{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000}
+#v{object-fit:contain;transform-origin:center center;display:block}
+#panel{background:#14181d;padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;font-size:13px}
+select,button{background:#222831;color:#e8eaed;border:1px solid #39424e;border-radius:6px;padding:6px 8px;font-size:13px}
+button{cursor:pointer}
+button.on{background:#1565c0;border-color:#1565c0}
+button:disabled{opacity:.4}
+label{display:flex;align-items:center;gap:6px}
+input[type=range]{width:110px}
+</style>
+</head>
+<body>
+<div id="top"><span id="dot"></span><span id="info">Menyambung...</span></div>
+<div id="box"><img id="v" alt=""></div>
+<div id="panel">
+  <label>Kamera <select id="cam"></select></label>
+  <label>Resolusi <select id="size"></select></label>
+  <label>FPS <select id="fps"></select></label>
+  <label>Kualiti <input id="q" type="range" min="20" max="95" step="5"><span id="qv"></span></label>
+  <button id="flash">Flash</button>
+  <button id="rot">Pusing</button>
+  <button id="mirror">Cermin</button>
+  <button id="snap">Gambar</button>
+  <button id="full">Skrin penuh</button>
+</div>
+
+<script>
+var $ = function (i) { return document.getElementById(i); };
+var st = null, built = false, online = false;
+
+function api(path, method) {
+  return fetch(path, { method: method || 'GET', cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  });
+}
+
+function layout() {
+  var b = $('box').getBoundingClientRect();
+  var v = $('v');
+  var r = st ? st.rot : 0;
+  var sw = (r == 90 || r == 270);
+  v.style.width = (sw ? b.height : b.width) + 'px';
+  v.style.height = (sw ? b.width : b.height) + 'px';
+  v.style.transform = (st && st.mirror ? 'scaleX(-1) ' : '') + 'rotate(' + r + 'deg)';
+}
+
+function reloadStream() {
+  $('v').src = '/stream?t=' + Date.now();
+}
+
+function fill(sel, items, getVal, getText) {
+  sel.innerHTML = '';
+  items.forEach(function (it) {
+    var o = document.createElement('option');
+    o.value = getVal(it);
+    o.textContent = getText(it);
+    sel.appendChild(o);
+  });
+}
+
+function build() {
+  if (built || !st) return;
+  built = true;
+  fill($('cam'), st.cameras, function (c) { return c.id; }, function (c) { return c.name + ' (' + c.id + ')'; });
+  var sizes = st.sizes.slice();
+  if (sizes.indexOf(st.size) < 0) sizes.push(st.size);
+  fill($('size'), sizes, function (s) { return s; }, function (s) { return s; });
+  fill($('fps'), [1, 2, 5, 10, 15, 20, 25], function (s) { return s; }, function (s) { return s; });
+
+  $('cam').onchange = function () { setp('cam=' + this.value, true); };
+  $('size').onchange = function () { setp('size=' + this.value, true); };
+  $('fps').onchange = function () { setp('fps=' + this.value); };
+  $('q').oninput = function () { $('qv').textContent = this.value; };
+  $('q').onchange = function () { setp('quality=' + this.value); };
+  $('flash').onclick = function () { setp('flash=' + (st.flash ? 0 : 1)); };
+  $('rot').onclick = function () { setp('rot=' + ((st.rot + 90) % 360)); };
+  $('mirror').onclick = function () { setp('mirror=' + (st.mirror ? 0 : 1)); };
+  $('snap').onclick = function () { window.open('/snapshot', '_blank'); };
+  $('full').onclick = function () {
+    try {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen();
+    } catch (e) {}
+  };
+}
+
+function setVal(el, v) {
+  if (document.activeElement !== el) el.value = v;
+}
+
+function update() {
+  if (!st) return;
+  $('dot').className = (st.error ? 'off' : 'on');
+  var t = st.actual + ' • ' + st.measuredFps.toFixed(1) + ' fps • penonton ' + st.clients;
+  if (typeof st.battery !== 'undefined') t += ' • bateri ' + st.battery + '%' + (st.charging ? ' (mengecas)' : '');
+  if (st.error) t = st.error;
+  $('info').textContent = t;
+
+  setVal($('cam'), st.cam);
+  setVal($('size'), st.size);
+  setVal($('fps'), st.fps);
+  setVal($('q'), st.quality);
+  $('qv').textContent = st.quality;
+  $('flash').className = st.flash ? 'on' : '';
+  $('flash').disabled = !st.flashSupported;
+  $('mirror').className = st.mirror ? 'on' : '';
+  layout();
+}
+
+function setp(q, reload) {
+  api('/api/set?' + q, 'POST').then(function (s) {
+    st = s;
+    update();
+    if (reload) setTimeout(reloadStream, 1500);
+  }).catch(function () {});
+}
+
+function poll() {
+  api('/api/status').then(function (s) {
+    st = s;
+    if (!online) {
+      online = true;
+      reloadStream();
+    }
+    build();
+    update();
+  }).catch(function () {
+    online = false;
+    $('dot').className = 'off';
+    $('info').textContent = 'Terputus... cuba semula';
+  });
+}
+
+window.addEventListener('resize', layout);
+setInterval(poll, 3000);
+poll();
+</script>
+</body>
+</html>

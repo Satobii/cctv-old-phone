@@ -1,0 +1,49 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.oldphone.cctv'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.oldphone.cctv"
+        minSdk 22          // Android 5.1.1 (OPPO A37fw)
+        targetSdk 34       // supaya boleh dipasang pada telefon utama Android baharu
+        versionCode 1
+        versionName "1.0"
+    }
+
+    // Kunci tetap (dalam repo) supaya APK baharu boleh dipasang atas versi lama tanpa uninstall.
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+// Sengaja TIADA dependency: tiada AndroidX, tiada library luar.
+dependencies {
+}
