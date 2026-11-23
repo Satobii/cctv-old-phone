@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ms">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -26,18 +26,18 @@ input[type=range]{width:110px}
 </style>
 </head>
 <body>
-<div id="top"><span id="dot"></span><span id="info">Menyambung...</span></div>
+<div id="top"><span id="dot"></span><span id="info">Connecting...</span></div>
 <div id="box"><img id="v" alt=""></div>
 <div id="panel">
-  <label>Kamera <select id="cam"></select></label>
-  <label>Resolusi <select id="size"></select></label>
+  <label>Camera <select id="cam"></select></label>
+  <label>Resolution <select id="size"></select></label>
   <label>FPS <select id="fps"></select></label>
-  <label>Kualiti <input id="q" type="range" min="20" max="95" step="5"><span id="qv"></span></label>
+  <label>Quality <input id="q" type="range" min="20" max="95" step="5"><span id="qv"></span></label>
   <button id="flash">Flash</button>
-  <button id="rot">Pusing</button>
-  <button id="mirror">Cermin</button>
-  <button id="snap">Gambar</button>
-  <button id="full">Skrin penuh</button>
+  <button id="rot">Rotate</button>
+  <button id="mirror">Mirror</button>
+  <button id="snap">Snapshot</button>
+  <button id="full">Fullscreen</button>
 </div>
 
 <script>
@@ -76,7 +76,8 @@ function fill(sel, items, getVal, getText) {
 }
 
 function build() {
-  if (built || !st) return;
+  // tunggu sehingga kamera sudah bangun dan senarai resolusi tersedia
+  if (built || !st || !st.sizes || st.sizes.length === 0) return;
   built = true;
   fill($('cam'), st.cameras, function (c) { return c.id; }, function (c) { return c.name + ' (' + c.id + ')'; });
   var sizes = st.sizes.slice();
@@ -108,8 +109,8 @@ function setVal(el, v) {
 function update() {
   if (!st) return;
   $('dot').className = (st.error ? 'off' : 'on');
-  var t = st.actual + ' • ' + st.measuredFps.toFixed(1) + ' fps • penonton ' + st.clients;
-  if (typeof st.battery !== 'undefined') t += ' • bateri ' + st.battery + '%' + (st.charging ? ' (mengecas)' : '');
+  var t = st.actual + ' • ' + st.measuredFps.toFixed(1) + ' fps • viewers ' + st.clients;
+  if (typeof st.battery !== 'undefined') t += ' • battery ' + st.battery + '%' + (st.charging ? ' (charging)' : '');
   if (st.error) t = st.error;
   $('info').textContent = t;
 
@@ -144,7 +145,7 @@ function poll() {
   }).catch(function () {
     online = false;
     $('dot').className = 'off';
-    $('info').textContent = 'Terputus... cuba semula';
+    $('info').textContent = 'Disconnected... retrying';
   });
 }
 

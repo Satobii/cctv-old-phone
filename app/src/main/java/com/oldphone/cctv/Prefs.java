@@ -26,6 +26,7 @@ public final class Prefs {
     public static final String ROT = "rot";              // -1 auto, 0/90/180/270
     public static final String MIRROR = "mirror";        // boolean
     public static final String AUTOSTART = "autostart";  // boolean
+    public static final String ECO = "eco";              // boolean, default true: kamera hidup bila ada penonton
 
     // Viewer
     public static final String V_HOST = "v_host";

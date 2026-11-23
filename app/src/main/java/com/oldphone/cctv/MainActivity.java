@@ -15,6 +15,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -53,6 +54,7 @@ import java.util.concurrent.TimeUnit;
 public class MainActivity extends Activity {
 
     private static final int REQ_PERM = 11;
+    private static final int REQ_MIC = 12;
 
     private SharedPreferences sp;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -63,10 +65,11 @@ public class MainActivity extends Activity {
 
     // viewer
     private WebView web;
+    private Talker talker;
     private boolean inWeb = false;
     private EditText etHost, etPort, etUser, etPass;
 
-    private static final String[] SIZE_LABELS = {"Rendah 320x240", "Sederhana 640x480", "HD 1280x720", "Full HD 1920x1080"};
+    private static final String[] SIZE_LABELS = {"Low 320x240", "Medium 640x480", "HD 1280x720", "Full HD 1920x1080"};
     private static final String[] SIZE_VALUES = {"320x240", "640x480", "1280x720", "1920x1080"};
     private static final int[] FPS_VALUES = {2, 5, 10, 15, 20};
 
@@ -89,6 +92,20 @@ public class MainActivity extends Activity {
             showViewer(true);
         } else {
             showChooser();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Streamer: bila app dibuka, hidupkan kamera sebentar (untuk semak/ubah suai)
+        if ("streamer".equals(sp.getString(Prefs.MODE, "")) && StreamService.isRunning()) {
+            Intent i = new Intent(this, StreamService.class);
+            i.setAction(StreamService.ACTION_WAKE);
+            try {
+                startService(i);
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -169,16 +186,16 @@ public class MainActivity extends Activity {
         LinearLayout root = column();
         root.setGravity(Gravity.CENTER_VERTICAL);
         root.addView(tv("Old Phone CCTV", 28, true));
-        root.addView(tv("Pilih peranan telefon ini. Pilihan disimpan; boleh tukar kemudian.", 15, false));
+        root.addView(tv("Choose the role of this phone. Your choice is saved and can be changed later.", 15, false));
 
-        Button s = btn("STREAMER\nTelefon lama (hantar video kamera)", new View.OnClickListener() {
+        Button s = btn("STREAMER\nOld phone (sends the camera video)", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 sp.edit().putString(Prefs.MODE, "streamer").apply();
                 route();
             }
         });
-        Button w = btn("VIEWER\nTelefon utama (tonton live)", new View.OnClickListener() {
+        Button w = btn("VIEWER\nMain phone (watch live)", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 sp.edit().putString(Prefs.MODE, "viewer").apply();
@@ -194,9 +211,9 @@ public class MainActivity extends Activity {
 
     private void switchMode() {
         new AlertDialog.Builder(this)
-                .setTitle("Tukar mod?")
-                .setMessage("Jika streamer sedang berjalan, ia akan dihentikan.")
-                .setPositiveButton("Tukar", new DialogInterface.OnClickListener() {
+                .setTitle("Switch mode?")
+                .setMessage("If the streamer is running, it will be stopped.")
+                .setPositiveButton("Switch", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
                         stopService(new Intent(MainActivity.this, StreamService.class));
@@ -204,7 +221,7 @@ public class MainActivity extends Activity {
                         route();
                     }
                 })
-                .setNegativeButton("Batal", null)
+                .setNegativeButton("Cancel", null)
                 .show();
     }
 
@@ -237,7 +254,7 @@ public class MainActivity extends Activity {
         root.addView(tvUrl);
         root.addView(tvCred);
 
-        btnToggle = btn("MULA", new View.OnClickListener() {
+        btnToggle = btn("START", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (StreamService.isRunning()) {
@@ -256,7 +273,7 @@ public class MainActivity extends Activity {
         root.addView(btnToggle);
 
         // Kamera
-        root.addView(tv("Kamera", 14, true));
+        root.addView(tv("Camera", 14, true));
         final List<String> camNames = cameraNames();
         root.addView(spinner(camNames, sp.getInt(Prefs.CAM, 0), new AdapterView.OnItemSelectedListener() {
             @Override
@@ -273,7 +290,7 @@ public class MainActivity extends Activity {
         }));
 
         // Resolusi
-        root.addView(tv("Resolusi", 14, true));
+        root.addView(tv("Resolution", 14, true));
         int selSize = 1;
         String curSize = sp.getString(Prefs.SIZE, "640x480");
         for (int i = 0; i < SIZE_VALUES.length; i++) if (SIZE_VALUES[i].equals(curSize)) selSize = i;
@@ -295,7 +312,7 @@ public class MainActivity extends Activity {
         }));
 
         // FPS
-        root.addView(tv("Kelajuan (FPS maksimum)", 14, true));
+        root.addView(tv("Speed (max FPS)", 14, true));
         List<String> fpsItems = new ArrayList<String>();
         int selFps = 2;
         int curFps = sp.getInt(Prefs.FPS, 10);
@@ -318,7 +335,7 @@ public class MainActivity extends Activity {
         }));
 
         // Kualiti
-        final TextView tvQ = tv("Kualiti JPEG: " + sp.getInt(Prefs.QUALITY, 60), 14, true);
+        final TextView tvQ = tv("JPEG quality: " + sp.getInt(Prefs.QUALITY, 60), 14, true);
         root.addView(tvQ);
         SeekBar sb = new SeekBar(this);
         sb.setMax(75); // 20..95
@@ -326,7 +343,7 @@ public class MainActivity extends Activity {
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                tvQ.setText("Kualiti JPEG: " + (progress + 20));
+                tvQ.setText("JPEG quality: " + (progress + 20));
             }
 
             @Override
@@ -343,7 +360,7 @@ public class MainActivity extends Activity {
 
         // Flash
         CheckBox cbFlash = new CheckBox(this);
-        cbFlash.setText("Lampu flash (jika disokong, kamera belakang)");
+        cbFlash.setText("Flash light (if supported, rear camera)");
         cbFlash.setTextColor(Color.WHITE);
         cbFlash.setChecked(sp.getBoolean(Prefs.FLASH, false));
         cbFlash.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -355,9 +372,23 @@ public class MainActivity extends Activity {
         });
         root.addView(cbFlash);
 
+        // Mod jimat bateri
+        CheckBox cbEco = new CheckBox(this);
+        cbEco.setText("Battery saver: camera runs only while someone is watching");
+        cbEco.setTextColor(Color.WHITE);
+        cbEco.setChecked(sp.getBoolean(Prefs.ECO, true));
+        cbEco.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton b, boolean checked) {
+                sp.edit().putBoolean(Prefs.ECO, checked).apply();
+                applyToService();
+            }
+        });
+        root.addView(cbEco);
+
         // Autostart
         CheckBox cbAuto = new CheckBox(this);
-        cbAuto.setText("Mula automatik bila telefon dihidupkan / app dibuka");
+        cbAuto.setText("Start automatically on boot / when the app opens");
         cbAuto.setTextColor(Color.WHITE);
         cbAuto.setChecked(sp.getBoolean(Prefs.AUTOSTART, true));
         cbAuto.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -368,19 +399,32 @@ public class MainActivity extends Activity {
         });
         root.addView(cbAuto);
 
-        root.addView(btn("Tukar kata laluan", new View.OnClickListener() {
+        if (Build.VERSION.SDK_INT >= 23) {
+            root.addView(btn("Allow background running (ignore battery optimization)", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                android.net.Uri.parse("package:" + getPackageName())));
+                    } catch (Exception e) {
+                        toast("Open Settings > Battery and allow this app to run in the background.");
+                    }
+                }
+            }));
+        }
+        root.addView(btn("Change password", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 changePassword();
             }
         }));
-        root.addView(btn("Tukar mod (Streamer / Viewer)", new View.OnClickListener() {
+        root.addView(btn("Switch mode (Streamer / Viewer)", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 switchMode();
             }
         }));
-        root.addView(tv("Nota: buka alamat di atas dalam browser telefon utama (rangkaian Wi-Fi yang sama) atau guna mod Viewer.", 13, false));
+        root.addView(tv("Note: open the address above in the browser of your main phone (same Wi-Fi network) or use Viewer mode.", 13, false));
 
         setContentView(sv);
         refreshStreamer();
@@ -398,11 +442,11 @@ public class MainActivity extends Activity {
             for (int i = 0; i < n; i++) {
                 Camera.CameraInfo ci = new Camera.CameraInfo();
                 Camera.getCameraInfo(i, ci);
-                l.add((ci.facing == Camera.CameraInfo.CAMERA_FACING_FRONT ? "Kamera depan" : "Kamera belakang") + " (" + i + ")");
+                l.add((ci.facing == Camera.CameraInfo.CAMERA_FACING_FRONT ? "Front camera" : "Rear camera") + " (" + i + ")");
             }
         } catch (Exception ignored) {
         }
-        if (l.isEmpty()) l.add("Kamera 0");
+        if (l.isEmpty()) l.add("Camera 0");
         return l;
     }
 
@@ -410,19 +454,21 @@ public class MainActivity extends Activity {
         if (tvStatus == null) return;
         StreamService s = StreamService.instance;
         if (s != null) {
-            String t = "STATUS: AKTIF - " + s.getMeasuredFps() + " fps, penonton: " + s.clients();
+            String t = s.isCameraActive()
+                    ? "STATUS: CAMERA ON - " + Math.round(s.getMeasuredFps()) + " fps, viewers: " + s.clients()
+                    : "STATUS: READY (camera asleep, saving battery)";
             if (s.cameraError.length() > 0) t += "\n" + s.cameraError;
             if (s.serverError.length() > 0) t += "\n" + s.serverError;
             tvStatus.setText(t);
-            btnToggle.setText("HENTI");
+            btnToggle.setText("STOP");
         } else {
-            tvStatus.setText("STATUS: BERHENTI");
-            btnToggle.setText("MULA");
+            tvStatus.setText("STATUS: STOPPED");
+            btnToggle.setText("START");
         }
         String ip = NetUtil.localIp(this);
         int port = sp.getInt(Prefs.PORT, 8080);
-        tvUrl.setText(ip == null ? "Tiada Wi-Fi" : "http://" + ip + ":" + port);
-        tvCred.setText("Pengguna: " + sp.getString(Prefs.USER, "admin") + "\nKata laluan: " + Prefs.password(this));
+        tvUrl.setText(ip == null ? "No Wi-Fi" : "http://" + ip + ":" + port);
+        tvCred.setText("User: " + sp.getString(Prefs.USER, "admin") + "\nPassword: " + Prefs.password(this));
     }
 
     private void applyToService() {
@@ -453,6 +499,7 @@ public class MainActivity extends Activity {
 
     private void launchService() {
         Intent i = new Intent(this, StreamService.class);
+        i.setAction(StreamService.ACTION_WAKE);
         try {
             if (Build.VERSION.SDK_INT >= 26) {
                 startForegroundService(i);
@@ -460,13 +507,18 @@ public class MainActivity extends Activity {
                 startService(i);
             }
         } catch (Exception e) {
-            toast("Gagal mulakan servis: " + e.getMessage());
+            toast("Failed to start service: " + e.getMessage());
         }
     }
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
         super.onRequestPermissionsResult(code, perms, results);
+        if (code == REQ_MIC) {
+            boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+            toast(ok ? "Microphone allowed. Hold the TALK button to speak." : "Microphone permission is required to talk.");
+            return;
+        }
         if (code != REQ_PERM) return;
         boolean camOk = true;
         for (int i = 0; i < perms.length; i++) {
@@ -477,7 +529,7 @@ public class MainActivity extends Activity {
         if (camOk) {
             launchService();
         } else {
-            toast("Kebenaran kamera diperlukan.");
+            toast("Camera permission is required.");
         }
     }
 
@@ -486,21 +538,21 @@ public class MainActivity extends Activity {
         et.setText(Prefs.password(this));
         et.setSingleLine(true);
         new AlertDialog.Builder(this)
-                .setTitle("Kata laluan baharu (min 4 aksara)")
+                .setTitle("New password (min 4 characters)")
                 .setView(et)
-                .setPositiveButton("Simpan", new DialogInterface.OnClickListener() {
+                .setPositiveButton("Save", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
                         String p = et.getText().toString().trim();
                         if (p.length() < 4 || p.contains(":")) {
-                            toast("Min 4 aksara dan tanpa tanda ':'");
+                            toast("Min 4 characters, no ':' allowed");
                         } else {
                             sp.edit().putString(Prefs.PASS, p).apply();
                             refreshStreamer();
                         }
                     }
                 })
-                .setNegativeButton("Batal", null)
+                .setNegativeButton("Cancel", null)
                 .show();
     }
 
@@ -518,10 +570,10 @@ public class MainActivity extends Activity {
         sv.addView(root);
 
         root.addView(tv("CCTV Viewer", 24, true));
-        root.addView(tv("Masukkan IP telefon CCTV (lihat pada skrin Streamer), atau tekan Imbas.", 14, false));
+        root.addView(tv("Enter the IP of the CCTV phone (shown on the Streamer screen), or tap Scan.", 14, false));
 
         etHost = new EditText(this);
-        etHost.setHint("IP, cth 192.168.1.50");
+        etHost.setHint("IP, e.g. 192.168.1.50");
         etHost.setTextColor(Color.WHITE);
         etHost.setText(sp.getString(Prefs.V_HOST, ""));
         etHost.setSingleLine(true);
@@ -536,14 +588,14 @@ public class MainActivity extends Activity {
         root.addView(etPort);
 
         etUser = new EditText(this);
-        etUser.setHint("Pengguna");
+        etUser.setHint("User");
         etUser.setTextColor(Color.WHITE);
         etUser.setText(sp.getString(Prefs.V_USER, "admin"));
         etUser.setSingleLine(true);
         root.addView(etUser);
 
         etPass = new EditText(this);
-        etPass.setHint("Kata laluan");
+        etPass.setHint("Password");
         etPass.setTextColor(Color.WHITE);
         etPass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         etPass.setText(sp.getString(Prefs.V_PASS, ""));
@@ -551,7 +603,7 @@ public class MainActivity extends Activity {
         root.addView(etPass);
 
         CheckBox cbAuto = new CheckBox(this);
-        cbAuto.setText("Sambung automatik bila app dibuka");
+        cbAuto.setText("Connect automatically when the app opens");
         cbAuto.setTextColor(Color.WHITE);
         cbAuto.setChecked(sp.getBoolean(Prefs.V_AUTO, false));
         cbAuto.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -562,19 +614,19 @@ public class MainActivity extends Activity {
         });
         root.addView(cbAuto);
 
-        root.addView(btn("Imbas rangkaian", new View.OnClickListener() {
+        root.addView(btn("Scan network", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 scan();
             }
         }));
-        root.addView(btn("SAMBUNG", new View.OnClickListener() {
+        root.addView(btn("CONNECT", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 connect();
             }
         }));
-        root.addView(btn("Tukar mod (Streamer / Viewer)", new View.OnClickListener() {
+        root.addView(btn("Switch mode (Streamer / Viewer)", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 sp.edit().putString(Prefs.MODE, "").apply();
@@ -601,12 +653,12 @@ public class MainActivity extends Activity {
     private void scan() {
         final String ip = NetUtil.localIp(this);
         if (ip == null) {
-            toast("Tiada sambungan Wi-Fi.");
+            toast("No Wi-Fi connection.");
             return;
         }
         final String prefix = ip.substring(0, ip.lastIndexOf('.') + 1);
         final int port = parsePort();
-        toast("Mengimbas " + prefix + "1-254 ...");
+        toast("Scanning " + prefix + "1-254 ...");
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -640,15 +692,15 @@ public class MainActivity extends Activity {
         if (isFinishing()) return;
         if (found.isEmpty()) {
             new AlertDialog.Builder(this)
-                    .setTitle("Tiada dijumpai")
-                    .setMessage("Pastikan streamer sedang AKTIF, dan kedua-dua telefon pada Wi-Fi yang sama. Anda juga boleh taip IP secara manual.")
+                    .setTitle("Nothing found")
+                    .setMessage("Make sure the streamer is RUNNING and both phones are on the same Wi-Fi. You can also type the IP manually.")
                     .setPositiveButton("OK", null)
                     .show();
             return;
         }
         final String[] arr = found.toArray(new String[0]);
         new AlertDialog.Builder(this)
-                .setTitle("Pilih kamera")
+                .setTitle("Choose camera")
                 .setItems(arr, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
@@ -661,7 +713,7 @@ public class MainActivity extends Activity {
     private void connect() {
         final String host = etHost == null ? sp.getString(Prefs.V_HOST, "") : etHost.getText().toString().trim();
         if (host.length() == 0) {
-            toast("Masukkan IP dahulu.");
+            toast("Enter an IP first.");
             return;
         }
         final int port = etPort == null ? sp.getInt(Prefs.V_PORT, 8080) : parsePort();
@@ -690,15 +742,15 @@ public class MainActivity extends Activity {
                     h.proceed(user, pass);
                 } else {
                     h.cancel();
-                    toast("Pengguna / kata laluan salah.");
+                    toast("Wrong user / password.");
                 }
             }
 
             @Override
             public void onReceivedError(WebView v, int code, String desc, String url) {
                 String html = "<body style='background:#111;color:#fff;font-family:sans-serif;padding:24px'>"
-                        + "<h3>Tidak dapat sambung</h3><p>" + host + ":" + port + "</p>"
-                        + "<p>Pastikan streamer AKTIF dan kedua-dua telefon pada Wi-Fi yang sama.</p></body>";
+                        + "<h3>Cannot connect</h3><p>" + host + ":" + port + "</p>"
+                        + "<p>Make sure the streamer is RUNNING and both phones are on the same Wi-Fi.</p></body>";
                 v.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
             }
         });
@@ -719,11 +771,52 @@ public class MainActivity extends Activity {
         lp.rightMargin = dp(8);
         fl.addView(close, lp);
 
+        // Push-to-talk: hold to speak, the streamer phone plays your voice
+        talker = new Talker(new Talker.Callback() {
+            @Override
+            public void onError(String message) {
+                toast(message);
+            }
+        });
+        final Button talk = new Button(this);
+        talk.setText("HOLD TO TALK");
+        talk.setAlpha(0.85f);
+        talk.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, MotionEvent ev) {
+                int a = ev.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN) {
+                    if (Build.VERSION.SDK_INT >= 23
+                            && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
+                        return true;
+                    }
+                    talk.setText("TALKING...");
+                    talker.start(host, port, user, pass);
+                    return true;
+                } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                    talker.stop();
+                    talk.setText("HOLD TO TALK");
+                    return true;
+                }
+                return true;
+            }
+        });
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(dp(170), dp(60));
+        tp.gravity = Gravity.TOP | Gravity.START;
+        tp.topMargin = dp(40);
+        tp.leftMargin = dp(8);
+        fl.addView(talk, tp);
+
         setContentView(fl);
         web.loadUrl("http://" + host + ":" + port + "/");
     }
 
     private void closeWeb() {
+        if (talker != null) {
+            talker.stop();
+            talker = null;
+        }
         if (web != null) {
             web.loadUrl("about:blank");
             web.destroy();

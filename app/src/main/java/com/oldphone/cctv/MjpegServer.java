@@ -1,5 +1,10 @@
 package com.oldphone.cctv;
 
+import android.content.Context;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioTrack;
+import android.os.PowerManager;
 import android.util.Base64;
 
 import java.io.BufferedInputStream;
@@ -41,6 +46,7 @@ public class MjpegServer extends Thread {
     private ServerSocket ss;
     private final AtomicInteger streams = new AtomicInteger();
     private final AtomicInteger active = new AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicBoolean talking = new java.util.concurrent.atomic.AtomicBoolean(false);
     private final ExecutorService pool = Executors.newCachedThreadPool();
     private final Set<Socket> open = Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private byte[] pageBytes;
@@ -62,7 +68,7 @@ public class MjpegServer extends Thread {
             ss.setReuseAddress(true);
             ss.bind(new InetSocketAddress(port));
         } catch (IOException e) {
-            svc.serverError = "Port " + port + " tidak boleh dibuka: " + e.getMessage();
+            svc.serverError = "Port " + port + " cannot be opened: " + e.getMessage();
             return;
         }
         while (running) {
@@ -153,42 +159,54 @@ public class MjpegServer extends Thread {
                     Thread.sleep(700); // perlahankan tekaan kata laluan
                 } catch (InterruptedException ignored) {
                 }
-                send(out, 401, "Unauthorized", "text/plain", "Perlu login".getBytes("UTF-8"),
+                send(out, 401, "Unauthorized", "text/plain", "Login required".getBytes("UTF-8"),
                         "WWW-Authenticate: Basic realm=\"Old Phone CCTV\"\r\n");
                 return;
             }
 
+            if (!path.equals("/talk")) svc.touch(20000); // valid request: keep the camera awake
+
             if (path.equals("/") || path.equals("/index.html")) {
                 send(out, 200, "OK", "text/html; charset=utf-8", page(), null);
             } else if (path.equals("/stream")) {
-                stream(out);
+                stream(s, out);
             } else if (path.equals("/snapshot") || path.equals("/snapshot.jpg")) {
-                StreamService.Frame f = svc.getFrame(0, 3000);
+                // Jika frame lama (kamera baru bangun), tunggu frame segar
+                StreamService.Frame f = svc.frameAgeMs() < 1500
+                        ? svc.getFrame(0, 3000)
+                        : svc.getFrame(svc.currentSeq(), 6000);
                 if (f == null || svc.frameAgeMs() > 8000) {
-                    send(out, 503, "Service Unavailable", "text/plain", "Kamera belum sedia".getBytes("UTF-8"), null);
+                    send(out, 503, "Service Unavailable", "text/plain", "Camera not ready".getBytes("UTF-8"), null);
                 } else {
                     send(out, 200, "OK", "image/jpeg", f.data, null);
                 }
+            } else if (path.equals("/talk")) {
+                talk(s, in, out);
             } else if (path.equals("/api/status")) {
                 send(out, 200, "OK", "application/json", svc.statusJson().getBytes("UTF-8"), null);
             } else if (path.equals("/api/set")) {
                 if (!"POST".equals(method)) {
-                    send(out, 405, "Method Not Allowed", "text/plain", "Guna POST".getBytes("UTF-8"), null);
+                    send(out, 405, "Method Not Allowed", "text/plain", "Use POST".getBytes("UTF-8"), null);
                 } else {
                     svc.updateSettings(parseQuery(query));
                     send(out, 200, "OK", "application/json", svc.statusJson().getBytes("UTF-8"), null);
                 }
             } else {
-                send(out, 404, "Not Found", "text/plain", "Tiada".getBytes("UTF-8"), null);
+                send(out, 404, "Not Found", "text/plain", "Not found".getBytes("UTF-8"), null);
             }
         } catch (Exception ignored) {
             // klien putus sambungan, tamat masa, dsb.
         }
     }
 
-    private void stream(OutputStream out) throws IOException, InterruptedException {
+    private void stream(Socket s, OutputStream out) throws IOException, InterruptedException {
         streams.incrementAndGet();
         try {
+            // Buffer hantar kecil: elak frame beratur dalam kernel (punca utama delay).
+            try {
+                s.setSendBufferSize(64 * 1024);
+            } catch (Exception ignored) {
+            }
             String head = "HTTP/1.1 200 OK\r\n"
                     + "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
                     + "Cache-Control: no-store\r\n"
@@ -196,19 +214,100 @@ public class MjpegServer extends Thread {
                     + "Connection: close\r\n\r\n";
             out.write(head.getBytes("ISO-8859-1"));
             out.flush();
-            long seq = 0;
+            // Jika frame tersimpan sudah lama (kamera baru bangun), jangan hantar gambar lapuk
+            long seq = svc.frameAgeMs() > 1500 ? svc.currentSeq() : 0;
+            byte[] buf = new byte[0];
             while (running && svc.isRunningFlag()) {
                 StreamService.Frame f = svc.getFrame(seq, 5000);
                 if (f == null) continue;
                 seq = f.seq;
-                String part = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + f.data.length + "\r\n\r\n";
-                out.write(part.getBytes("ISO-8859-1"));
-                out.write(f.data);
-                out.write("\r\n".getBytes("ISO-8859-1"));
+                byte[] hd = ("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + f.data.length + "\r\n\r\n")
+                        .getBytes("ISO-8859-1");
+                int total = hd.length + f.data.length + 2;
+                if (buf.length < total) buf = new byte[total + 16 * 1024];
+                System.arraycopy(hd, 0, buf, 0, hd.length);
+                System.arraycopy(f.data, 0, buf, hd.length, f.data.length);
+                buf[total - 2] = '\r';
+                buf[total - 1] = '\n';
+                out.write(buf, 0, total); // satu tulisan sahaja per frame
                 out.flush();
             }
         } finally {
             streams.decrementAndGet();
+        }
+    }
+
+    /**
+     * Push-to-talk: the viewer sends raw PCM (16 kHz, mono, 16-bit) until it closes the connection.
+     * It is played through the speaker of this phone. Only one talker at a time.
+     */
+    @SuppressWarnings("deprecation")
+    private void talk(Socket s, InputStream in, OutputStream out) throws IOException {
+        if (!talking.compareAndSet(false, true)) {
+            send(out, 409, "Conflict", "text/plain", "Someone else is talking".getBytes("UTF-8"), null);
+            return;
+        }
+        PowerManager.WakeLock wl = null;
+        AudioTrack at = null;
+        AudioManager am = null;
+        int oldVol = -1;
+        try {
+            s.setSoTimeout(5000);
+            try {
+                PowerManager pm = (PowerManager) svc.getSystemService(Context.POWER_SERVICE);
+                wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cctv:talk");
+                wl.setReferenceCounted(false);
+                wl.acquire(10 * 60 * 1000L);
+            } catch (Exception ignored) {
+            }
+            try {
+                am = (AudioManager) svc.getSystemService(Context.AUDIO_SERVICE);
+                oldVol = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0);
+            } catch (Exception ignored) {
+            }
+            int min = AudioTrack.getMinBufferSize(16000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            at = new AudioTrack(AudioManager.STREAM_MUSIC, 16000, AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, Math.max(min * 2, 8000), AudioTrack.MODE_STREAM);
+            at.play();
+
+            byte[] buf = new byte[2048];
+            int have = 0;
+            while (running) {
+                int n = in.read(buf, have, buf.length - have);
+                if (n <= 0) break;
+                int total = have + n;
+                int even = total & ~1; // keep 16-bit samples aligned
+                at.write(buf, 0, even);
+                if (total > even) {
+                    buf[0] = buf[total - 1];
+                    have = 1;
+                } else {
+                    have = 0;
+                }
+            }
+        } catch (IOException ignored) {
+            // viewer released the button / timeout
+        } finally {
+            if (at != null) {
+                try {
+                    at.stop();
+                } catch (Exception ignored) {
+                }
+                try {
+                    at.release();
+                } catch (Exception ignored) {
+                }
+            }
+            try {
+                if (am != null && oldVol >= 0) am.setStreamVolume(AudioManager.STREAM_MUSIC, oldVol, 0);
+            } catch (Exception ignored) {
+            }
+            try {
+                if (wl != null && wl.isHeld()) wl.release();
+            } catch (Exception ignored) {
+            }
+            talking.set(false);
         }
     }
 
@@ -250,7 +349,7 @@ public class MjpegServer extends Thread {
                 in.close();
                 pageBytes = b.toByteArray();
             } catch (IOException e) {
-                pageBytes = "viewer.html tidak dijumpai".getBytes();
+                pageBytes = "viewer.html not found".getBytes();
             }
         }
         return pageBytes;
@@ -263,7 +362,7 @@ public class MjpegServer extends Thread {
             if (c == '\n') break;
             if (c != '\r') {
                 sb.append((char) c);
-                if (sb.length() > 8192) throw new IOException("baris terlalu panjang");
+                if (sb.length() > 8192) throw new IOException("line too long");
             }
         }
         if (c == -1 && sb.length() == 0) return null;

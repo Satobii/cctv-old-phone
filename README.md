@@ -1,49 +1,54 @@
 # Old Phone CCTV
 
-Satu APK, dua mod:
+One APK, two modes:
 
-- **Streamer** = telefon lama (OPPO A37fw, Android 5.1.1) yang menghantar video kamera.
-- **Viewer** = telefon utama yang menonton live feed.
+- **Streamer** = the old phone (OPPO A37fw, Android 5.1.1) that sends the camera video.
+- **Viewer** = your main phone that watches the live feed and can talk through the old phone.
 
-Boleh juga tonton terus dalam browser (Chrome dsb.) pada alamat `http://IP-telefon-lama:8080`.
+You can also watch from any browser at `http://<old-phone-ip>:8080` (video and controls only; push-to-talk needs the Viewer app).
 
-## Keserasian Android 5.1.1 (API 22)
+## Android 5.1.1 (API 22) compatibility
 
-- `minSdk 22`. Tiada AndroidX, tiada library luar (dependency kosong).
-- Kamera guna **Camera API 1** (`android.hardware.Camera`), bukan Camera2.
-- Streaming **MJPEG melalui HTTP**, pelayan ditulis sendiri (ringan, RAM rendah).
-- Semua API Android 6+ (kebenaran runtime, dsb.) dilindungi dengan semakan `SDK_INT`.
-- `targetSdk 34` supaya APK boleh dipasang pada telefon utama yang baharu.
+- `minSdk 22`. No AndroidX, no external libraries (empty dependency list).
+- Camera uses **Camera API 1** (`android.hardware.Camera`), not Camera2.
+- **MJPEG over HTTP** with a tiny built-in server (light on RAM).
+- Anything newer than Android 5.1 (runtime permissions, battery-optimization prompt) is guarded by `SDK_INT` checks.
+- `targetSdk 34` so the APK installs on modern main phones.
 
-## Cara bina APK (GitHub Actions)
+## Build the APK (GitHub Actions)
 
-1. Cipta repo baharu di GitHub (cth. `old-phone-cctv`).
-2. Muat naik **semua fail dalam folder ini** (termasuk folder `.github` dan `app/debug.keystore`).
-3. Buka tab **Actions** -> workflow **Build APK** akan jalan sendiri (3-6 minit).
-   Kalau tak jalan: Actions -> Build APK -> **Run workflow**.
-4. Bila siap, buka run itu -> bahagian **Artifacts** -> muat turun `OldPhoneCCTV-apk` (zip, dalamnya `app-release.apk`).
+1. Create a repo on GitHub and upload **everything in this folder** (including `.github` and `app/debug.keystore`).
+2. Open the **Actions** tab. **Build APK** runs automatically (3-6 min). If not: Actions -> Build APK -> **Run workflow**.
+3. When it is green, open the run -> **Artifacts** -> download `OldPhoneCCTV-apk` (zip containing `app-release.apk`).
 
-APK ditandatangani dengan kunci tetap (`app/debug.keystore`), jadi versi baharu boleh dipasang atas yang lama tanpa uninstall.
+The APK is signed with a fixed key (`app/debug.keystore`), so new versions install over old ones without uninstalling.
 
-## Cara guna
+## How to use
 
-1. Pasang APK pada **kedua-dua** telefon (benarkan "Install unknown apps").
-2. **Telefon lama**: buka app -> pilih **STREAMER** -> benarkan kamera. Streaming mula sendiri.
-   Skrin tunjuk alamat (`http://192.168.x.x:8080`), pengguna `admin` dan kata laluan rawak.
-3. **Telefon utama**: buka app -> pilih **VIEWER** -> tekan **Imbas rangkaian** (atau taip IP) -> masukkan kata laluan -> **SAMBUNG**.
-4. Dalam paparan live ada kawalan: kamera depan/belakang, resolusi, FPS, kualiti, flash, pusing, cermin, gambar.
+1. Install the APK on **both** phones (allow "Install unknown apps").
+2. **Old phone**: open the app -> **STREAMER** -> allow the camera. It shows the address (`http://192.168.x.x:8080`), user `admin` and a random password.
+3. **Main phone**: open the app -> **VIEWER** -> **Scan network** (or type the IP) -> enter the password -> **CONNECT**.
+4. Live view controls: front/rear camera, resolution, FPS, quality, flash, rotate, mirror, snapshot.
+5. **Talk**: press and **hold** the **HOLD TO TALK** button (top-left of the live view) and speak. Your voice plays from the old phone's speaker. Release to stop. The first time, allow the microphone permission on the main phone.
 
-## Supaya sentiasa hidup (telefon lama)
+The old phone's media volume is raised to maximum while you talk and restored afterwards.
 
-- Biarkan **dicas** sepanjang masa.
-- Dalam app, "Mula automatik" dihidupkan (default) -> servis bermula selepas telefon restart.
-- Pada ColorOS/OPPO: Tetapan -> Pengurus Keselamatan/Privasi -> kebenaran **Auto-start** untuk Old Phone CCTV, dan matikan penjimatan bateri untuknya. Kunci app dalam senarai Recent (tahan kad app -> Lock) jika ada pilihan itu.
-- Kalau gambar terbalik/senget: tekan **Pusing** dalam halaman live.
+## Battery saver (on by default)
 
-## Keselamatan
+- The service and HTTP server always run (almost no battery use).
+- The **camera, CPU lock and high-performance Wi-Fi only run while someone is watching** (or the app is open) and stop ~20 seconds after the last viewer leaves.
+- Turn it off in the Streamer screen if you want the camera on all the time.
 
-- Pelayan hanya untuk rangkaian Wi-Fi rumah. **Jangan** buka port di router (port forwarding).
-- Semua laluan perlukan login (Basic auth). Kata laluan dijana rawak; boleh tukar dalam app.
-- Sambungan ialah HTTP biasa (tidak disulitkan) -> sesuai untuk LAN peribadi sahaja.
-- Akses dari luar rumah: Tailscale memerlukan Android 8.0+, jadi **tidak boleh dipasang pada OPPO A37fw (5.1.1)**.
-  Tanpa hardware tambahan, kekal LAN sahaja.
+## Keep it alive
+
+- Keep the old phone **charging**.
+- The streamer restarts itself after a reboot ("Start automatically" is on by default) and after you swipe the app away from Recents.
+- On ColorOS/OPPO: Settings -> Security/Privacy -> allow **Auto-start** for Old Phone CCTV, and disable battery optimization for it. Lock the app in Recents if the option exists.
+- Image sideways or upside down? Tap **Rotate** on the live page.
+
+## Security
+
+- LAN only. **Do not** port-forward the server on your router.
+- Every route requires a login (Basic auth). The password is random and can be changed in the app.
+- Traffic is plain HTTP (not encrypted), fine for a private home network.
+- Remote access: Tailscale needs Android 8.0+, so it **cannot run on the OPPO A37fw (5.1.1)**. Without extra hardware, stay on LAN only.

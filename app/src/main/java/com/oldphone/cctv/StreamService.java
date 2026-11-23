@@ -1,5 +1,6 @@
 package com.oldphone.cctv;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -22,6 +23,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.Process;
 import android.os.SystemClock;
 
 import org.json.JSONArray;
@@ -36,14 +38,19 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Servis latar depan: buka kamera (Camera API 1), ubah setiap frame jadi JPEG,
- * dan hidangkan melalui pelayan HTTP MJPEG (MjpegServer).
+ * Servis latar depan.
+ *
+ * Mod jimat bateri (default): servis + pelayan HTTP sentiasa hidup (hampir tiada kos bateri),
+ * tetapi KAMERA hanya dibuka bila ada penonton / app dibuka, dan ditutup ~20 saat selepas
+ * penonton terakhir pergi. Semasa kamera tidur, wake lock dan Wi-Fi high-perf dilepaskan.
  */
 @SuppressWarnings("deprecation")
 public class StreamService extends Service {
 
     static final String ACTION_APPLY = "com.oldphone.cctv.APPLY";
+    static final String ACTION_WAKE = "com.oldphone.cctv.WAKE";
     private static final String CHANNEL = "cctv";
+    private static final long LINGER_MS = 20000;
 
     static volatile StreamService instance;
 
@@ -72,7 +79,11 @@ public class StreamService extends Service {
     private SurfaceTexture dummyTexture;
     private MjpegServer server;
     private PowerManager.WakeLock wakeLock;
-    private WifiManager.WifiLock wifiLock;
+    private WifiManager.WifiLock wifiIdleLock;
+    private WifiManager.WifiLock wifiPerfLock;
+
+    private volatile boolean cameraActive = false;
+    private volatile long wakeUntil = 0;
 
     // ---- stor frame ----
     private final Object frameLock = new Object();
@@ -92,6 +103,7 @@ public class StreamService extends Service {
     private volatile boolean flashOn = false;
     private volatile int rotSetting = -1;
     private volatile boolean mirror = false;
+    private volatile boolean eco = true;
 
     // ---- maklumat untuk status ----
     private volatile int curW = 0, curH = 0;
@@ -111,6 +123,7 @@ public class StreamService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent == null ? null : intent.getAction();
         if (!started) {
             started = true;
             running = true;
@@ -121,22 +134,44 @@ public class StreamService extends Service {
                 stopSelf();
                 return START_NOT_STICKY;
             }
-            acquireLocks();
+            acquireIdleLock();
             loadSettings();
 
-            camThread = new HandlerThread("camera");
+            camThread = new HandlerThread("camera", Process.THREAD_PRIORITY_DISPLAY);
             camThread.start();
             camHandler = new Handler(camThread.getLooper());
 
             server = new MjpegServer(this, Prefs.get(this).getInt(Prefs.PORT, 8080));
             server.start();
 
-            scheduleOpen(0);
+            camHandler.post(checkRunnable);
             camHandler.postDelayed(watchdog, 10000);
-        } else if (intent != null && ACTION_APPLY.equals(intent.getAction())) {
+        } else if (ACTION_APPLY.equals(action)) {
             applyFromPrefs();
         }
+        if (ACTION_WAKE.equals(action)) {
+            touch(30000);
+        }
         return START_STICKY;
+    }
+
+    /** App dibuang dari Recents: minta Android hidupkan semula servis ini. */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        try {
+            Intent i = new Intent(this, StreamService.class);
+            PendingIntent pi;
+            if (Build.VERSION.SDK_INT >= 26) {
+                pi = PendingIntent.getForegroundService(this, 1, i,
+                        PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
+            } else {
+                pi = PendingIntent.getService(this, 1, i, PendingIntent.FLAG_ONE_SHOT);
+            }
+            AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 1500, pi);
+        } catch (Exception ignored) {
+        }
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
@@ -155,17 +190,15 @@ public class StreamService extends Service {
             camHandler.post(new Runnable() {
                 @Override
                 public void run() {
+                    cameraActive = false;
                     closeCamera();
                     if (camThread != null) camThread.quitSafely();
                 }
             });
         }
+        releasePerfLocks();
         try {
-            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        } catch (Exception ignored) {
-        }
-        try {
-            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+            if (wifiIdleLock != null && wifiIdleLock.isHeld()) wifiIdleLock.release();
         } catch (Exception ignored) {
         }
         try {
@@ -206,27 +239,54 @@ public class StreamService extends Service {
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= 23) piFlags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), piFlags);
-        b.setContentTitle("CCTV aktif")
-                .setContentText("Streaming kamera sedang berjalan")
+        b.setContentTitle("CCTV ready")
+                .setContentText("Waiting for viewers (camera starts when someone watches)")
                 .setSmallIcon(R.drawable.ic_stat_cctv)
                 .setContentIntent(pi)
                 .setOngoing(true);
         return b.build();
     }
 
-    private void acquireLocks() {
+    /** Kunci Wi-Fi ringan: kekalkan Wi-Fi hidup walaupun skrin mati. */
+    private void acquireIdleLock() {
         try {
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cctv:stream");
-            wakeLock.setReferenceCounted(false);
-            wakeLock.acquire();
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            wifiIdleLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL, "cctv:idle");
+            wifiIdleLock.setReferenceCounted(false);
+            wifiIdleLock.acquire();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Semasa kamera hidup: CPU jaga + Wi-Fi tanpa penjimatan kuasa (kurangkan lag). */
+    private void acquirePerfLocks() {
+        try {
+            if (wakeLock == null) {
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cctv:stream");
+                wakeLock.setReferenceCounted(false);
+            }
+            if (!wakeLock.isHeld()) wakeLock.acquire();
         } catch (Exception ignored) {
         }
         try {
-            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "cctv:wifi");
-            wifiLock.setReferenceCounted(false);
-            wifiLock.acquire();
+            if (wifiPerfLock == null) {
+                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                wifiPerfLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "cctv:perf");
+                wifiPerfLock.setReferenceCounted(false);
+            }
+            if (!wifiPerfLock.isHeld()) wifiPerfLock.acquire();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void releasePerfLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (wifiPerfLock != null && wifiPerfLock.isHeld()) wifiPerfLock.release();
         } catch (Exception ignored) {
         }
     }
@@ -244,6 +304,7 @@ public class StreamService extends Service {
         flashOn = sp.getBoolean(Prefs.FLASH, false);
         rotSetting = sp.getInt(Prefs.ROT, -1);
         mirror = sp.getBoolean(Prefs.MIRROR, false);
+        eco = sp.getBoolean(Prefs.ECO, true);
     }
 
     private void setSize(String s) {
@@ -278,18 +339,22 @@ public class StreamService extends Service {
         flashOn = sp.getBoolean(Prefs.FLASH, false);
         rotSetting = sp.getInt(Prefs.ROT, -1);
         mirror = sp.getBoolean(Prefs.MIRROR, false);
+        eco = sp.getBoolean(Prefs.ECO, true);
 
         if (camHandler == null) return;
-        if (restart) {
-            scheduleOpen(0);
-        } else {
-            camHandler.post(new Runnable() {
-                @Override
-                public void run() {
+        final boolean r = restart;
+        camHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                checkActive();
+                if (!cameraActive) return;
+                if (r) {
+                    openCamera();
+                } else {
                     applyFlash();
                 }
-            });
-        }
+            }
+        });
     }
 
     /** Dipanggil oleh pelayan HTTP (/api/set). */
@@ -319,13 +384,54 @@ public class StreamService extends Service {
     }
 
     // ------------------------------------------------------------------
-    // Kamera (semua berjalan pada camThread)
+    // Hidup / tidur kamera (semua pada camThread)
+    // ------------------------------------------------------------------
+
+    /** Ada aktiviti (penonton / app dibuka): pastikan kamera hidup sekurang-kurangnya ms lagi. */
+    void touch(long ms) {
+        long until = SystemClock.elapsedRealtime() + ms;
+        if (until > wakeUntil) wakeUntil = until;
+        Handler h = camHandler;
+        if (h != null && !cameraActive) {
+            h.removeCallbacks(checkRunnable);
+            h.post(checkRunnable);
+        }
+    }
+
+    private final Runnable checkRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            checkActive();
+            camHandler.removeCallbacks(this);
+            camHandler.postDelayed(this, 3000);
+        }
+    };
+
+    private void checkActive() {
+        boolean want = !eco || clients() > 0 || SystemClock.elapsedRealtime() < wakeUntil;
+        if (want && !cameraActive) {
+            cameraActive = true;
+            acquirePerfLocks();
+            openCamera();
+        } else if (!want && cameraActive) {
+            cameraActive = false;
+            camHandler.removeCallbacks(openRunnable);
+            closeCamera();
+            releasePerfLocks();
+            cameraError = "";
+            measuredFps = 0f;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Kamera
     // ------------------------------------------------------------------
 
     private final Runnable openRunnable = new Runnable() {
         @Override
         public void run() {
-            openCamera();
+            if (cameraActive) openCamera();
         }
     };
 
@@ -340,8 +446,8 @@ public class StreamService extends Service {
         public void run() {
             if (!running) return;
             long now = SystemClock.elapsedRealtime();
-            if (now - lastPreviewTime > 15000) {
-                cameraError = "Tiada frame, kamera dimulakan semula";
+            if (cameraActive && now - lastPreviewTime > 15000) {
+                cameraError = "No frames, restarting camera";
                 openCamera();
             }
             camHandler.postDelayed(this, 10000);
@@ -351,7 +457,7 @@ public class StreamService extends Service {
     private final Camera.ErrorCallback errCb = new Camera.ErrorCallback() {
         @Override
         public void onError(int error, Camera c) {
-            cameraError = "Ralat kamera (" + error + "), cuba semula";
+            cameraError = "Camera error (" + error + "), retrying";
             scheduleOpen(2000);
         }
     };
@@ -363,7 +469,6 @@ public class StreamService extends Service {
             lastPreviewTime = now;
             try {
                 MjpegServer sv = server;
-                // Tiada penonton: encode 1 fps sahaja (jimat CPU/bateri)
                 int interval = (sv != null && sv.clientCount() > 0) ? 1000 / Math.max(1, fps) : 1000;
                 if (now - lastEncodeTime >= interval - 3) {
                     lastEncodeTime = now;
@@ -400,13 +505,13 @@ public class StreamService extends Service {
     }
 
     private void openCamera() {
-        if (!running) return;
+        if (!running || !cameraActive) return;
         closeCamera();
         lastPreviewTime = SystemClock.elapsedRealtime();
         try {
             int n = Camera.getNumberOfCameras();
             if (n <= 0) {
-                cameraError = "Tiada kamera dijumpai";
+                cameraError = "No camera found";
                 scheduleOpen(5000);
                 return;
             }
@@ -430,6 +535,16 @@ public class StreamService extends Service {
             try {
                 p.setPreviewSize(best.width, best.height);
                 p.setPreviewFormat(ImageFormat.NV21);
+                c.setParameters(p);
+            } catch (Exception ignored) {
+            }
+
+            // Kekalkan fps tinggi (elak kamera turun ke 7 fps dalam cahaya malap) + mod video
+            p = c.getParameters();
+            try {
+                int[] r = pickFpsRange(p.getSupportedPreviewFpsRange());
+                if (r != null) p.setPreviewFpsRange(r[0], r[1]);
+                p.setRecordingHint(true);
                 c.setParameters(p);
             } catch (Exception ignored) {
             }
@@ -460,7 +575,7 @@ public class StreamService extends Service {
             cameraError = "";
             applyFlash();
         } catch (Exception e) {
-            cameraError = "Gagal buka kamera: " + e.getMessage();
+            cameraError = "Failed to open camera: " + e.getMessage();
             closeCamera();
             scheduleOpen(5000);
         }
@@ -503,6 +618,26 @@ public class StreamService extends Service {
         }
     }
 
+    /** Pilih julat fps dengan maksimum tertinggi (<=30), minimum paling hampir 15 tanpa melebihinya. */
+    private static int[] pickFpsRange(List<int[]> ranges) {
+        if (ranges == null || ranges.isEmpty()) return null;
+        int maxTop = 0;
+        for (int[] r : ranges) if (r[1] <= 30000 && r[1] > maxTop) maxTop = r[1];
+        if (maxTop == 0) return null;
+        int[] best = null;
+        for (int[] r : ranges) {
+            if (r[1] != maxTop) continue;
+            if (best == null) {
+                best = r;
+            } else if (r[0] <= 15000 && (best[0] > 15000 || r[0] > best[0])) {
+                best = r;
+            } else if (best[0] > 15000 && r[0] < best[0]) {
+                best = r;
+            }
+        }
+        return best;
+    }
+
     private static Camera.Size pickSize(List<Camera.Size> list, int w, int h) {
         Camera.Size best = list.get(0);
         long bestScore = Long.MAX_VALUE;
@@ -534,7 +669,7 @@ public class StreamService extends Service {
     }
 
     // ------------------------------------------------------------------
-    // API untuk pelayan HTTP
+    // API untuk pelayan HTTP / UI
     // ------------------------------------------------------------------
 
     /** Tunggu frame yang lebih baharu daripada afterSeq. Null jika tamat masa. */
@@ -551,12 +686,22 @@ public class StreamService extends Service {
         }
     }
 
+    long currentSeq() {
+        synchronized (frameLock) {
+            return frameSeq;
+        }
+    }
+
     long frameAgeMs() {
         return SystemClock.elapsedRealtime() - lastFrameAt;
     }
 
     boolean isRunningFlag() {
         return running;
+    }
+
+    boolean isCameraActive() {
+        return cameraActive;
     }
 
     int clients() {
@@ -581,7 +726,7 @@ public class StreamService extends Service {
                 Camera.getCameraInfo(i, ci);
                 JSONObject c = new JSONObject();
                 c.put("id", i);
-                c.put("name", ci.facing == Camera.CameraInfo.CAMERA_FACING_FRONT ? "Depan" : "Belakang");
+                c.put("name", ci.facing == Camera.CameraInfo.CAMERA_FACING_FRONT ? "Front" : "Rear");
                 cams.put(c);
             }
             o.put("cameras", cams);
@@ -604,6 +749,8 @@ public class StreamService extends Service {
             o.put("clients", clients());
             o.put("uptime", (SystemClock.elapsedRealtime() - startTime) / 1000);
             o.put("error", cameraError);
+            o.put("eco", eco);
+            o.put("active", cameraActive);
 
             Intent b = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
             if (b != null) {
